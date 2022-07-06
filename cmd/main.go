@@ -8,11 +8,15 @@ import (
 	"image/gif"
 	"io"
 	"io/ioutil"
+	"log"
 	"math"
 	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
+	"time"
 )
 
 var palette = []color.Color{color.White, color.RGBA{255, 0, 0, 255}}
@@ -27,7 +31,12 @@ func main() {
 	//lissajous(os.Stdout)
 	//echo()
 	//dup()
-	fetch()
+	//fetch(os.Stdout)
+	//fetchAll()
+
+	http.HandleFunc("/", handler) // each request calls handler
+	http.HandleFunc("/count", counter)
+	log.Fatal(http.ListenAndServe("localhost:8000", nil))
 }
 
 func lissajous(out io.Writer) {
@@ -100,14 +109,23 @@ func countLines(f *os.File, counts map[string]int) {
 	}
 }
 
-func fetch() {
+func fetch(out io.Writer) {
+
+	const (
+		prefix = "http://"
+	)
+
 	for _, url := range os.Args[1:] {
+		if !strings.HasPrefix(url, prefix) {
+			url = prefix + url
+		}
 		resp, err := http.Get(url)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fetch: %v\n", err)
 			os.Exit(1)
 		}
-		b, err := ioutil.ReadAll(resp.Body)
+
+		b, err := io.Copy(out, resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fetch: reading %s: %v\n", url, err)
@@ -115,4 +133,53 @@ func fetch() {
 		}
 		fmt.Printf("%s", b)
 	}
+}
+
+func fetchAll() {
+	start := time.Now()
+	ch := make(chan string)
+	for _, url := range os.Args[1:] {
+		go fetchEach(url, ch) // start a goroutine
+	}
+	for range os.Args[1:] {
+		fmt.Println(<-ch) // receive from channel ch
+	}
+	fmt.Printf("%.2fs elapsed\n", time.Since(start).Seconds())
+}
+
+func fetchEach(url string, ch chan<- string) {
+
+	start := time.Now()
+	resp, err := http.Get(url)
+	if err != nil {
+		ch <- fmt.Sprint(err) // send to channel ch
+		return
+	}
+	nbytes, err := io.Copy(ioutil.Discard, resp.Body)
+	resp.Body.Close() // don't leak resources
+	if err != nil {
+		ch <- fmt.Sprintf("while reading %s: %v", url, err)
+		return
+	}
+	secs := time.Since(start).Seconds()
+	ch <- fmt.Sprintf("%.2fs  %7d  %s", secs, nbytes, url)
+
+}
+
+var mu sync.Mutex
+var count int
+
+// handler echoes the Path component of the request URL r.
+func handler(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	count++
+	mu.Unlock()
+	fmt.Fprintf(w, "URL.Path = %q\n", r.URL.Path)
+}
+
+// counter echoes the number of calls so far.
+func counter(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	fmt.Fprintf(w, "Count %d\n", count)
+	mu.Unlock()
 }
